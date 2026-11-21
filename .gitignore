@@ -1,0 +1,9 @@
+desktop/bin/
+desktop/obj/
+dist/
+mobile/android/
+mobile/ios/
+
+# Claude Code local settings
+.claude/settings.local.json
+mobile/.claude/settings.local.json
