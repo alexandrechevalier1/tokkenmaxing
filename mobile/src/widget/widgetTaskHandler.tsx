@@ -1,14 +1,19 @@
 import { requestWidgetUpdate, type WidgetInfo, type WidgetTaskHandlerProps } from 'react-native-android-widget';
 
-import { currentLimits, fetchReport } from '../api';
-import { loadCache, loadConnection, saveCache } from '../storage';
+import { ClaudeError, fetchReport, getAccount, shortProblem } from '../claude';
+import { currentLimits, targetsFrom, type FullTargets } from '../report';
+import { loadCache, loadTargets, saveCache } from '../storage';
 import type { Cached } from '../types';
 import { TokenRingWidget, WIDGET_NAME } from './TokenRingWidget';
 
 export interface WidgetState {
+  /** Signed in to Claude. */
   configured: boolean;
   cached: Cached | null;
+  targets: FullTargets;
   offline: boolean;
+  /** Why the last read failed, in a few words (not for "offline"). */
+  problem: string | null;
 }
 
 function render(info: Pick<WidgetInfo, 'width' | 'height'>, state: WidgetState) {
@@ -20,29 +25,37 @@ function render(info: Pick<WidgetInfo, 'width' | 'height'>, state: WidgetState) 
       width={info.width}
       height={info.height}
       configured={state.configured}
-      limits={report ? currentLimits(report, now) : null}
+      limits={report ? currentLimits(report, now, state.targets) : null}
       hasData={report?.hasData ?? false}
       fetchedAt={state.cached?.fetchedAt ?? null}
       offline={state.offline}
-      problem={report?.problem ?? null}
+      problem={state.problem}
     />
   );
 }
 
-/** Reads storage and, if asked, fetches fresh numbers from the PC (runs headless, app closed). */
+/** Reads storage and, if asked, fresh numbers from Claude (runs headless, app closed). */
 async function loadState(fetchFresh: boolean): Promise<WidgetState> {
-  const [connection, cache] = await Promise.all([loadConnection(), loadCache()]);
-  let cached = cache;
-  let offline = false;
-  if (fetchFresh && connection) {
+  const [account, cache, stored] = await Promise.all([getAccount(), loadCache(), loadTargets()]);
+  const state: WidgetState = {
+    configured: account != null,
+    cached: cache,
+    targets: stored ?? targetsFrom(cache),
+    offline: false,
+    problem: null,
+  };
+  if (fetchFresh && account) {
     try {
-      cached = { report: await fetchReport(connection, 8000), fetchedAt: Date.now() };
-      await saveCache(cached);
-    } catch {
-      offline = true;
+      state.cached = await fetchReport(cache);
+      await saveCache(state.cached);
+    } catch (e) {
+      const err = e instanceof ClaudeError ? e : new ClaudeError('bad_response', String(e));
+      if (err.kind === 'signed_out') state.configured = false;
+      else if (err.kind === 'offline') state.offline = true;
+      else state.problem = shortProblem(err);
     }
   }
-  return { configured: connection != null, cached, offline };
+  return state;
 }
 
 /**

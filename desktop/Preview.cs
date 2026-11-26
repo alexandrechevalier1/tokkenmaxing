@@ -6,14 +6,9 @@ namespace TokkenMaxing;
 /// <summary>What the dashboard needs from its owner (the tray app, or the preview stub).</summary>
 interface IDashboardHost
 {
-    AppSettings Settings { get; }
-    ApiServer? Server { get; }
     void SetTarget(string key, int target);
     void SetTrayIcon(string key, bool visible);
-    void SetServerEnabled(bool value);
     void SetStartup(bool value);
-    void RegenerateAccessCode();
-    void AllowFirewall();
     Task RefreshNowAsync();
 }
 
@@ -24,16 +19,11 @@ interface IDashboardHost
 /// </summary>
 static class Preview
 {
-    sealed class StubHost(AppSettings settings) : IDashboardHost
+    sealed class StubHost : IDashboardHost
     {
-        public AppSettings Settings { get; } = settings;
-        public ApiServer? Server => null;
         public void SetTarget(string key, int target) { }
         public void SetTrayIcon(string key, bool visible) { }
-        public void SetServerEnabled(bool value) { }
         public void SetStartup(bool value) { }
-        public void RegenerateAccessCode() { }
-        public void AllowFirewall() { }
         public Task RefreshNowAsync() => Task.CompletedTask;
     }
 
@@ -46,7 +36,7 @@ static class Preview
         var settings = AppSettings.Load();
         var report = UsageReportBuilder.Build(client, settings);
 
-        using (var form = new PopupForm(new StubHost(settings)))
+        using (var form = new PopupForm(new StubHost()))
         {
             form.Location = new Point(-10000, -10000);
             form.ShowReport(report);

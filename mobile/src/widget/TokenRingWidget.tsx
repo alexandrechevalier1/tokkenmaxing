@@ -10,6 +10,7 @@ export interface TokenRingWidgetProps {
   /** Widget size in dp, from WidgetInfo. */
   width: number;
   height: number;
+  /** Signed in to Claude. */
   configured: boolean;
   /** [session, weekly], already adjusted for windows that rolled over. */
   limits: LimitUsage[] | null;
@@ -29,9 +30,9 @@ export function TokenRingWidget({ width, height, configured, limits, hasData, fe
   const ring = Math.max(40, Math.floor(Math.min((width - 28) / 2, height - textBlock - footerBlock - 16)));
 
   const footer = !configured
-    ? "Ouvre l'appli pour connecter le PC"
+    ? "Ouvre l'appli pour te connecter à Claude"
     : offline
-      ? `PC hors ligne${fetchedAt ? ` · ${formatClock(fetchedAt, now)}` : ''}`
+      ? `Hors ligne${fetchedAt ? ` · ${formatClock(fetchedAt, now)}` : ''}`
       : problem
         ? `⚠ ${problem}`
         : fetchedAt

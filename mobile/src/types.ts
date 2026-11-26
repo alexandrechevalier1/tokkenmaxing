@@ -1,16 +1,20 @@
-/** JSON returned by the Windows app: GET http://<pc>:7420/api/usage (see desktop/PlanUsage.cs). */
+/**
+ * The rings' report, built on the phone from Claude's usage service (src/report.ts). Same shape as
+ * the Windows app's report (desktop/PlanUsage.cs: UsageReport), which older versions of the phone
+ * app received from the PC and may still sit in the cache.
+ */
 
 export type LimitKey = 'session' | 'weekly';
 export type Status = 'under' | 'on_track' | 'over' | 'idle';
 
-/** One ring as the PC sends it. Only these fields are relied on: the rest is recomputed (src/objective.ts). */
+/** One ring as read. Only these fields are relied on: the rest is recomputed (src/objective.ts). */
 export interface WireLimit {
   key: LimitKey;
   /** "Session" (5-hour window) or "Hebdo". */
   label: string;
   /** Usage of the plan limit as shown by Claude, 0..100. */
   percent: number;
-  /** When the window resets (the PC projects the weekly one forward when it has passed). */
+  /** When the window resets (the weekly one is projected forward when it has passed). */
   resetsAt: string | null;
   /** The objective: % of the limit to have used at reset. */
   target: number;
@@ -47,10 +51,10 @@ export interface UsageReport {
   app: 'TokkenMaxing';
   version: number;
   hasData: boolean;
-  /** "live": the PC asked Claude; "cache": Claude Code's stored copy. */
+  /** "live": read from Claude. "cache" / "none": a report saved from the PC by an older version. */
   source: 'live' | 'cache' | 'none';
   fetchedAt: string | null;
-  /** Why the PC could not refresh (expired token, no network…), if so. */
+  /** Only in reports saved from the PC by an older version. */
   problem: string | null;
   updatedAt: string;
   limits: WireLimit[];
@@ -59,13 +63,8 @@ export interface UsageReport {
 
 export type Targets = Partial<Record<LimitKey, number>>;
 
-export interface Connection {
-  baseUrl: string;
-  code: string;
-}
-
 export interface Cached {
   report: UsageReport;
-  /** Epoch ms of the last successful fetch from the PC. */
+  /** Epoch ms of the last successful read. */
   fetchedAt: number;
 }

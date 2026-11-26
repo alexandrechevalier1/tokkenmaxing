@@ -1,11 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import type { Cached, Connection } from './types';
+import type { FullTargets } from './report';
+import type { Cached } from './types';
 
-// Read by both the app and the widget's headless task.
+// Read by both the app and the widget's headless task. The Claude tokens are not here: they
+// live in the secure store (src/claude.ts).
 const KEYS = {
-  connection: 'tm.connection',
   cache: 'tm.cache.v2',
+  targets: 'tm.targets',
 } as const;
 
 async function read<T>(key: string): Promise<T | null> {
@@ -25,8 +27,12 @@ async function write(key: string, value: unknown): Promise<void> {
   }
 }
 
-export const loadConnection = () => read<Connection>(KEYS.connection);
-export const saveConnection = (c: Connection) => write(KEYS.connection, c);
-
 export const loadCache = () => read<Cached>(KEYS.cache);
 export const saveCache = (c: Cached) => write(KEYS.cache, c);
+
+/** The objectives, set on the phone. null until changed once (or carried over from the PC). */
+export const loadTargets = () => read<FullTargets>(KEYS.targets);
+export const saveTargets = (t: FullTargets) => write(KEYS.targets, t);
+
+/** What the old version stored to reach the PC. */
+export const forgetPcConnection = () => AsyncStorage.removeItem('tm.connection').catch(() => undefined);

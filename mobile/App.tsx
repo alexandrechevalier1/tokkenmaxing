@@ -1,4 +1,6 @@
+import * as Clipboard from 'expo-clipboard';
 import { StatusBar } from 'expo-status-bar';
+import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -17,17 +19,22 @@ import { requestPinWidget } from 'react-native-android-widget';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SvgXml } from 'react-native-svg';
 
-import { ApiError, currentLimits, fetchReport, normalizeBaseUrl, resetText, sendTargets } from './src/api';
+import { ClaudeError, fetchReport, finishLogin, getAccount, pendingLoginState, shortProblem, signOut, startLogin, type Account } from './src/claude';
 import { Ring } from './src/components/Ring';
 import { formatAgo, formatClock, formatPercent } from './src/format';
+import { parseAuthCode } from './src/oauth';
 import { formatExpected, formatRatio } from './src/objective';
+import { DEFAULT_TARGETS, currentLimits, resetText, targetsFrom, type FullTargets } from './src/report';
 import { palette, scaleSvg } from './src/ring';
-import { loadCache, loadConnection, saveCache, saveConnection } from './src/storage';
-import type { Cached, Connection, LimitKey, LimitUsage, Targets } from './src/types';
+import { forgetPcConnection, loadCache, loadTargets, saveCache, saveTargets } from './src/storage';
+import type { Cached, LimitKey, LimitUsage } from './src/types';
 import { WIDGET_NAME } from './src/widget/TokenRingWidget';
 import { updateWidgets } from './src/widget/widgetTaskHandler';
 
-const POLL_MS = 5000;
+/** Claude is asked once a minute while the app is open (the Windows app: every 2 min). */
+const POLL_MS = 60_000;
+/** Coming back to the app reads again only if the last read is older than this. */
+const RESUME_GAP_MS = 20_000;
 
 export default function App() {
   return (
@@ -43,54 +50,59 @@ function Dashboard() {
   const { width } = useWindowDimensions();
 
   const [loaded, setLoaded] = useState(false);
-  const [connection, setConnection] = useState<Connection | null>(null);
+  const [account, setAccount] = useState<Account | null>(null);
   const [cached, setCached] = useState<Cached | null>(null);
-  const [error, setError] = useState<ApiError | null>(null);
+  const [targets, setTargets] = useState<FullTargets>(DEFAULT_TARGETS);
+  const [error, setError] = useState<ClaudeError | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showAccount, setShowAccount] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  // Objectives changed on the phone, shown right away while they are sent to the PC.
-  const [pendingTargets, setPendingTargets] = useState<Targets | null>(null);
-  const [targetError, setTargetError] = useState<string | null>(null);
-  const pendingRef = useRef<Targets>({});
-  const targetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Bumped on every objective write: a poll that started before it carries stale objectives.
-  const writeSeq = useRef(0);
+  const cachedRef = useRef<Cached | null>(null);
+  const lastAttempt = useRef(0);
 
   // Restore what the app (or the widget) saved last time.
   useEffect(() => {
     void (async () => {
-      const [c, k] = await Promise.all([loadConnection(), loadCache()]);
-      setConnection(c);
+      const [a, k, t] = await Promise.all([getAccount(), loadCache(), loadTargets()]);
+      cachedRef.current = k;
+      setAccount(a);
       setCached(k);
-      setShowSettings(c == null);
+      // First start of this version: keep the objectives that were set on the PC.
+      const initial = t ?? targetsFrom(k);
+      setTargets(initial);
+      if (!t) void saveTargets(initial);
+      void forgetPcConnection();
+      setShowAccount(a == null);
       setLoaded(true);
     })();
   }, []);
 
-  const refresh = useCallback(async (conn: Connection | null) => {
-    const seq = writeSeq.current;
+  const refresh = useCallback(async () => {
+    lastAttempt.current = Date.now();
     try {
-      const next: Cached = { report: await fetchReport(conn), fetchedAt: Date.now() };
-      if (seq !== writeSeq.current) return true; // overtaken by an objective change
+      const next = await fetchReport(cachedRef.current);
+      cachedRef.current = next;
       setCached(next);
       setError(null);
       await saveCache(next);
-      return true;
     } catch (e) {
-      setError(e instanceof ApiError ? e : new ApiError('unreachable', String(e)));
-      return false;
+      const err = e instanceof ClaudeError ? e : new ClaudeError('bad_response', String(e));
+      setError(err);
+      if (err.kind === 'signed_out') {
+        setAccount(null);
+        setShowAccount(true);
+      }
     }
   }, []);
 
-  // Live polling while the app is in the foreground.
+  // Live reads while the app is in the foreground and signed in.
   useEffect(() => {
-    if (!loaded || !connection) return;
+    if (!loaded || !account) return;
     let timer: ReturnType<typeof setInterval> | null = null;
     const start = () => {
       if (timer) return;
-      void refresh(connection);
-      timer = setInterval(() => void refresh(connection), POLL_MS);
+      if (Date.now() - lastAttempt.current > RESUME_GAP_MS) void refresh();
+      timer = setInterval(() => void refresh(), POLL_MS);
     };
     const stop = () => {
       if (timer) clearInterval(timer);
@@ -102,7 +114,7 @@ function Dashboard() {
       stop();
       sub.remove();
     };
-  }, [loaded, connection, refresh]);
+  }, [loaded, account, refresh]);
 
   // Keeps countdowns honest.
   useEffect(() => {
@@ -110,78 +122,56 @@ function Dashboard() {
     return () => clearInterval(t);
   }, []);
 
-  // Push to the home-screen widget whenever what it shows changes (at most once a minute otherwise).
+  // Push to the home-screen widget whenever what it shows changes.
   const lastWidgetKey = useRef('');
   useEffect(() => {
     if (!loaded || Platform.OS !== 'android') return;
     const r = cached?.report;
+    const offline = error?.kind === 'offline';
+    const problem = error && !offline ? shortProblem(error) : null;
     const key = [
-      connection != null,
-      r?.limits.map((l) => `${l.percent}/${l.target}/${l.resetsAt}`).join(','),
-      r?.problem,
-      error != null,
+      account != null,
+      r?.limits.map((l) => `${l.percent}/${l.resetsAt}`).join(','),
+      targets.session,
+      targets.weekly,
+      offline,
+      problem,
       cached && formatClock(cached.fetchedAt),
     ].join('|');
     if (key === lastWidgetKey.current) return;
     lastWidgetKey.current = key;
-    void updateWidgets({ configured: connection != null, cached, offline: error != null });
-  }, [loaded, connection, cached, error]);
+    void updateWidgets({ configured: account != null, cached, targets, offline, problem });
+  }, [loaded, account, cached, targets, error]);
 
-  // Objectives live on the PC: send the change (debounced), show it meanwhile.
-  const changeTarget = useCallback(
-    (key: LimitKey, value: number) => {
-      setTargetError(null);
-      pendingRef.current = { ...pendingRef.current, [key]: value };
-      setPendingTargets(pendingRef.current);
-      if (targetTimer.current) clearTimeout(targetTimer.current);
-      targetTimer.current = setTimeout(async () => {
-        const sent = pendingRef.current;
-        writeSeq.current++;
-        try {
-          const next: Cached = { report: await sendTargets(connection, sent), fetchedAt: Date.now() };
-          writeSeq.current++;
-          setCached(next);
-          setError(null);
-          await saveCache(next);
-        } catch (e) {
-          setTargetError(e instanceof ApiError ? e.message : String(e));
-        }
-        // Forget what was sent, unless it changed again in the meantime.
-        const rest: Targets = { ...pendingRef.current };
-        for (const k of Object.keys(sent) as LimitKey[]) if (rest[k] === sent[k]) delete rest[k];
-        pendingRef.current = rest;
-        setPendingTargets(Object.keys(rest).length > 0 ? rest : null);
-      }, 500);
-    },
-    [connection],
-  );
-
-  useEffect(
-    () => () => {
-      if (targetTimer.current) clearTimeout(targetTimer.current);
-    },
-    [],
-  );
+  // Objectives live on the phone.
+  const changeTarget = useCallback((key: LimitKey, value: number) => {
+    setTargets((t) => {
+      const next = { ...t, [key]: value };
+      void saveTargets(next);
+      return next;
+    });
+  }, []);
 
   const onPullToRefresh = useCallback(async () => {
+    if (!account) return;
     setRefreshing(true);
-    await refresh(connection);
+    await refresh();
     setRefreshing(false);
-  }, [connection, refresh]);
+  }, [account, refresh]);
 
-  const onConnect = useCallback(
-    async (next: Connection) => {
-      const normalized = { baseUrl: normalizeBaseUrl(next.baseUrl), code: next.code.trim().toUpperCase() };
-      const ok = await refresh(normalized);
-      if (ok) {
-        await saveConnection(normalized);
-        setConnection(normalized);
-        setShowSettings(false);
-      }
-      return ok;
-    },
-    [refresh],
-  );
+  const onSignedIn = useCallback((a: Account) => {
+    setError(null);
+    lastAttempt.current = 0; // read right away
+    setAccount(a);
+    setShowAccount(false);
+  }, []);
+
+  const onSignOut = useCallback(async () => {
+    await signOut();
+    setAccount(null);
+    setError(null);
+    setShowAccount(true);
+  }, []);
 
   if (!loaded) {
     return (
@@ -193,9 +183,10 @@ function Dashboard() {
 
   const report = cached?.report ?? null;
   const hasData = report?.hasData ?? false;
-  const limits = report ? currentLimits(report, now, pendingTargets) : null;
+  const limits = report ? currentLimits(report, now, targets) : null;
   const contentWidth = Math.min(width, 520) - 32;
   const ringSize = Math.min(Math.floor((contentWidth - 16) / 2), 190);
+  const warning = account && error && error.kind !== 'offline' && error.kind !== 'signed_out' ? error : null;
 
   return (
     <ScrollView
@@ -204,10 +195,12 @@ function Dashboard() {
         styles.content,
         { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 32, width: contentWidth + 32 },
       ]}
+      keyboardShouldPersistTaps="handled"
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
           onRefresh={onPullToRefresh}
+          enabled={account != null}
           tintColor={palette.text}
           colors={[palette.onPace]}
           progressBackgroundColor={palette.surface}
@@ -218,19 +211,26 @@ function Dashboard() {
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>TokkenMaxing</Text>
-          <ConnectionLine connection={connection} error={error} cached={cached} now={now} />
+          <ConnectionLine account={account} error={error} cached={cached} now={now} />
         </View>
-        <Pressable onPress={() => setShowSettings((s) => !s)} style={({ pressed }) => [styles.chip, pressed && styles.pressed]} hitSlop={8}>
-          <Text style={styles.chipText}>{showSettings ? 'Fermer' : 'Réglages'}</Text>
+        <Pressable onPress={() => setShowAccount((s) => !s)} style={({ pressed }) => [styles.chip, pressed && styles.pressed]} hitSlop={8}>
+          <Text style={styles.chipText}>{showAccount ? 'Fermer' : 'Compte'}</Text>
         </Pressable>
       </View>
 
-      {showSettings && <SettingsCard initial={connection} onConnect={onConnect} error={error} />}
+      {showAccount && (
+        <AccountCard
+          account={account}
+          expired={!account && error?.kind === 'signed_out' ? error.message : null}
+          onSignedIn={onSignedIn}
+          onSignOut={onSignOut}
+        />
+      )}
 
-      {report?.problem && (
+      {warning && (
         <View style={[styles.card, styles.warning]}>
-          <Text style={styles.warningText}>⚠ Le PC n'arrive plus à lire tes limites : {report.problem}.</Text>
-          {report.fetchedAt && <Text style={styles.muted}>Chiffres de {formatClock(report.fetchedAt, now)}.</Text>}
+          <Text style={styles.warningText}>⚠ {warning.message}</Text>
+          {cached && <Text style={styles.muted}>Chiffres de {formatClock(cached.fetchedAt, now)}.</Text>}
         </View>
       )}
 
@@ -252,9 +252,7 @@ function Dashboard() {
         })}
       </View>
 
-      {connection && limits && hasData && (
-        <TargetsCard limits={limits} onChange={changeTarget} error={targetError} saving={pendingTargets != null} />
-      )}
+      {limits && hasData && <TargetsCard limits={limits} onChange={changeTarget} />}
 
       {/* Where the week went */}
       {report && hasData && report.breakdown.length > 0 && (
@@ -305,26 +303,13 @@ function RingDetails({ u, now }: { u: LimitUsage; now: number }) {
 
 const STEP = 5;
 
-/** Objectives: % of the limit to have used at reset. Stored on the PC, applied everywhere. */
-function TargetsCard({
-  limits,
-  onChange,
-  error,
-  saving,
-}: {
-  limits: LimitUsage[];
-  onChange: (key: LimitKey, value: number) => void;
-  error: string | null;
-  saving: boolean;
-}) {
+/** Objectives: % of the limit to have used at reset. Stored on the phone, used by the widget too. */
+function TargetsCard({ limits, onChange }: { limits: LimitUsage[]; onChange: (key: LimitKey, value: number) => void }) {
   const [barWidth, setBarWidth] = useState(0);
   const names: Record<LimitKey, string> = { session: 'Objectif session', weekly: 'Objectif hebdo' };
   return (
     <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <Text style={styles.cardTitle}>Objectifs</Text>
-        {saving && <ActivityIndicator size="small" color={palette.muted} />}
-      </View>
+      <Text style={styles.cardTitle}>Objectifs</Text>
       <Text style={styles.muted}>% de la limite à utiliser d'ici la réinitialisation. 100 % : tout utiliser, au rythme du temps qui passe.</Text>
       {limits.map((u) => (
         <View key={u.key} style={styles.stepRow}>
@@ -337,7 +322,6 @@ function TargetsCard({
           <StepButton label="+" disabled={u.target >= 100} onPress={() => onChange(u.key, Math.min(100, Math.floor(u.target / STEP) * STEP + STEP))} />
         </View>
       ))}
-      {error && <Text style={styles.error}>{error}</Text>}
 
       <View style={styles.legend} onLayout={(e) => setBarWidth(Math.floor(e.nativeEvent.layout.width))}>
         <Text style={styles.muted}>Couleur du disque : ta conso par rapport au point blanc</Text>
@@ -367,21 +351,23 @@ function StepButton({ label, onPress, disabled }: { label: string; onPress: () =
   );
 }
 
-function ConnectionLine({ connection, error, cached, now }: { connection: Connection | null; error: ApiError | null; cached: Cached | null; now: number }) {
+function ConnectionLine({ account, error, cached, now }: { account: Account | null; error: ClaudeError | null; cached: Cached | null; now: number }) {
   let color: string = palette.onPace;
   let text: string;
-  const report = cached?.report;
-  if (!connection) {
+  const since = cached ? ` · données de ${formatClock(cached.fetchedAt, now)}` : '';
+  if (!account) {
     color = palette.idle;
-    text = 'PC non configuré';
-  } else if (error) {
+    text = `Non connecté à Claude${since}`;
+  } else if (error?.kind === 'offline') {
     color = palette.danger;
-    text = cached ? `PC hors ligne · données de ${formatClock(cached.fetchedAt, now)}` : 'PC hors ligne';
-  } else if (report?.fetchedAt) {
-    if (report.problem) color = palette.warning;
-    text = `${report.source === 'live' ? 'Claude' : 'Cache Claude Code'} · à jour ${formatAgo(report.fetchedAt, now)}`;
+    text = `Hors ligne${since}`;
+  } else if (error) {
+    color = palette.warning;
+    text = `${shortProblem(error)}${since}`;
+  } else if (cached) {
+    text = `Claude · à jour ${formatAgo(cached.fetchedAt, now)}`;
   } else {
-    text = 'Connexion…';
+    text = 'Lecture…';
   }
   return (
     <View style={styles.connection}>
@@ -393,62 +379,160 @@ function ConnectionLine({ connection, error, cached, now }: { connection: Connec
   );
 }
 
-function SettingsCard({
-  initial,
-  onConnect,
-  error,
+/**
+ * Sign-in to Claude, on the phone: Claude's page opens in the browser, you authorize, it shows a
+ * code. Copied, the code is picked up from the clipboard on return (or pasted by hand).
+ */
+function AccountCard({
+  account,
+  expired,
+  onSignedIn,
+  onSignOut,
 }: {
-  initial: Connection | null;
-  onConnect: (c: Connection) => Promise<boolean>;
-  error: ApiError | null;
+  account: Account | null;
+  expired: string | null;
+  onSignedIn: (a: Account) => void;
+  onSignOut: () => void;
 }) {
-  const [baseUrl, setBaseUrl] = useState(initial?.baseUrl.replace(/^http:\/\//, '') ?? '');
-  const [code, setCode] = useState(initial?.code ?? '');
+  // State of the sign-in in progress: the code Claude shows ends with it.
+  const [awaiting, setAwaiting] = useState<string | null>(null);
+  const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
-  const [tried, setTried] = useState(false);
-  const disabled = busy || !baseUrl.trim() || !code.trim();
+  const [message, setMessage] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const tried = useRef(new Set<string>());
 
-  const submit = async () => {
-    if (disabled) return;
-    setBusy(true);
-    setTried(true);
-    await onConnect({ baseUrl, code });
-    setBusy(false);
+  // A sign-in started before Android closed the app (browser in front) is still valid.
+  useEffect(() => {
+    if (account) return;
+    void pendingLoginState().then((s) => s && setAwaiting(s));
+  }, [account]);
+
+  const submit = useCallback(
+    async (value: string) => {
+      const text = value.trim();
+      if (busyRef.current || !text) return;
+      busyRef.current = true;
+      tried.current.add(text);
+      setBusy(true);
+      setMessage(null);
+      try {
+        const a = await finishLogin(text);
+        setAwaiting(null);
+        setCode('');
+        onSignedIn(a);
+      } catch (e) {
+        setMessage(e instanceof ClaudeError ? e.message : String(e));
+      } finally {
+        busyRef.current = false;
+        setBusy(false);
+      }
+    },
+    [onSignedIn],
+  );
+
+  // Back from the browser: if the clipboard holds this sign-in's code, use it.
+  useEffect(() => {
+    if (account || !awaiting) return;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const check = async () => {
+      const text = (await Clipboard.getStringAsync().catch(() => '')).trim();
+      if (!text || tried.current.has(text) || parseAuthCode(text)?.state !== awaiting) return;
+      setCode(text);
+      void submit(text);
+    };
+    // Android only lets the app read the clipboard once its window has the focus: try a few times.
+    const checkSoon = () => [0, 400, 1200].forEach((ms) => timers.push(setTimeout(() => void check(), ms)));
+    checkSoon();
+    const sub = AppState.addEventListener('change', (s) => s === 'active' && checkSoon());
+    return () => {
+      sub.remove();
+      timers.forEach(clearTimeout);
+    };
+  }, [account, awaiting, submit]);
+
+  const open = async () => {
+    setMessage(null);
+    try {
+      const { url, state } = await startLogin();
+      setAwaiting(state);
+      setCode('');
+      await WebBrowser.openBrowserAsync(url, { toolbarColor: palette.bg, showTitle: true, enableBarCollapsing: true });
+    } catch (e) {
+      setMessage(e instanceof ClaudeError ? e.message : "Impossible d'ouvrir le navigateur.");
+    }
   };
+
+  const paste = async () => {
+    const text = (await Clipboard.getStringAsync().catch(() => '')).trim();
+    if (!text) {
+      setMessage('Le presse-papiers est vide : copie le code sur la page Claude.');
+      return;
+    }
+    setCode(text);
+    void submit(text);
+  };
+
+  if (account) {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Compte Claude</Text>
+        <View style={styles.connection}>
+          <View style={[styles.dot, { backgroundColor: palette.onPace }]} />
+          <Text style={styles.stepLabel}>{account.email ? `Connecté : ${account.email}` : 'Connecté'}</Text>
+        </View>
+        <Text style={styles.muted}>
+          Le téléphone lit tes limites directement chez Claude, sans passer par le PC. Sa connexion est à lui : elle se renouvelle toute seule et ne touche pas à celle de Claude Code.
+        </Text>
+        <Pressable onPress={onSignOut} style={({ pressed }) => [styles.buttonSecondary, pressed && styles.pressed]}>
+          <Text style={styles.buttonText}>Se déconnecter</Text>
+        </Pressable>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.card}>
-      <Text style={styles.cardTitle}>Connexion au PC</Text>
-      <Text style={styles.muted}>
-        Clique sur un anneau TokkenMaxing dans la barre des tâches Windows : l'adresse et le code sont en bas du panneau. Avec Tailscale sur le PC et le téléphone, l'adresse en 100.x marche partout, même en 4G.
-      </Text>
-      <Text style={styles.inputLabel}>Adresse du PC</Text>
-      <TextInput
-        value={baseUrl}
-        onChangeText={setBaseUrl}
-        placeholder="100.101.102.103:7420"
-        placeholderTextColor={palette.idle}
-        autoCapitalize="none"
-        autoCorrect={false}
-        keyboardType="url"
-        style={styles.input}
-      />
-      <Text style={styles.inputLabel}>Code</Text>
-      <TextInput
-        value={code}
-        onChangeText={(t) => setCode(t.toUpperCase())}
-        placeholder="ABCD2345"
-        placeholderTextColor={palette.idle}
-        autoCapitalize="characters"
-        autoCorrect={false}
-        maxLength={16}
-        style={[styles.input, styles.codeInput]}
-        onSubmitEditing={submit}
-      />
-      {tried && !busy && error && error.kind !== 'not_configured' && <Text style={styles.error}>{error.message}</Text>}
-      <Pressable onPress={submit} disabled={disabled} style={({ pressed }) => [styles.button, disabled && styles.buttonDisabled, pressed && styles.pressed]}>
-        {busy ? <ActivityIndicator color={palette.text} /> : <Text style={styles.buttonText}>Se connecter</Text>}
+      <Text style={styles.cardTitle}>Compte Claude</Text>
+      {expired && <Text style={styles.error}>{expired}</Text>}
+      <Text style={styles.muted}>Connecte ton compte Claude (Pro ou Max) : le téléphone lira tes limites lui-même, sans PC.</Text>
+
+      <Text style={styles.stepLabel}>1. Autoriser</Text>
+      <Text style={styles.muted}>La page Claude s'ouvre dans le navigateur. Connecte-toi si besoin, puis autorise l'accès.</Text>
+      <Pressable onPress={open} disabled={busy} style={({ pressed }) => [styles.button, busy && styles.buttonDisabled, pressed && styles.pressed]}>
+        <Text style={styles.buttonText}>{awaiting ? 'Rouvrir la page Claude' : 'Se connecter à Claude'}</Text>
       </Pressable>
+
+      {awaiting && (
+        <>
+          <Text style={[styles.stepLabel, { marginTop: 6 }]}>2. Copier le code</Text>
+          <Text style={styles.muted}>Claude affiche un code : copie-le avec son bouton, puis reviens ici. Il est repris tout seul.</Text>
+          <View style={styles.codeRow}>
+            <TextInput
+              value={code}
+              onChangeText={setCode}
+              placeholder="Code affiché par Claude"
+              placeholderTextColor={palette.idle}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={[styles.input, styles.codeInput, { flex: 1 }]}
+              onSubmitEditing={() => void submit(code)}
+              returnKeyType="done"
+            />
+            <Pressable onPress={paste} disabled={busy} style={({ pressed }) => [styles.chip, pressed && styles.pressed]} hitSlop={6}>
+              <Text style={styles.chipText}>Coller</Text>
+            </Pressable>
+          </View>
+          <Pressable
+            onPress={() => void submit(code)}
+            disabled={busy || !code.trim()}
+            style={({ pressed }) => [styles.button, (busy || !code.trim()) && styles.buttonDisabled, pressed && styles.pressed]}
+          >
+            {busy ? <ActivityIndicator color={palette.text} /> : <Text style={styles.buttonText}>Valider</Text>}
+          </Pressable>
+        </>
+      )}
+      {message && <Text style={styles.error}>{message}</Text>}
     </View>
   );
 }
@@ -507,7 +591,6 @@ const styles = StyleSheet.create({
   card: { backgroundColor: '#111A2E', borderRadius: 16, borderWidth: 1, borderColor: palette.surface, padding: 16, gap: 10 },
   warning: { borderColor: palette.danger },
   warningText: { color: palette.danger, fontSize: 14, lineHeight: 20 },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   cardTitle: { color: palette.text, fontSize: 16, fontWeight: '700' },
   stepRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 2 },
   stepLabel: { color: palette.text, fontSize: 15, fontWeight: '600' },
@@ -534,7 +617,7 @@ const styles = StyleSheet.create({
   barTrack: { flex: 1, height: 6, borderRadius: 3, backgroundColor: palette.surface, overflow: 'hidden' },
   barFill: { height: 6, borderRadius: 3, backgroundColor: palette.accent },
   muted: { color: palette.muted, fontSize: 13, lineHeight: 18, flexShrink: 1 },
-  inputLabel: { color: palette.muted, fontSize: 13, marginTop: 4 },
+  codeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   input: {
     backgroundColor: palette.bg,
     borderWidth: 1,
@@ -545,9 +628,10 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontSize: 16,
   },
-  codeInput: { fontFamily: Platform.select({ android: 'monospace', ios: 'Menlo' }), letterSpacing: 2 },
+  codeInput: { fontFamily: Platform.select({ android: 'monospace', ios: 'Menlo' }), fontSize: 14 },
   error: { color: palette.danger, fontSize: 13, lineHeight: 18 },
   button: { backgroundColor: palette.onPace, borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginTop: 4 },
+  buttonSecondary: { backgroundColor: palette.surface, borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginTop: 4, borderWidth: 1, borderColor: palette.border },
   buttonDisabled: { backgroundColor: palette.surface },
   buttonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
   footer: { color: palette.idle, fontSize: 12, lineHeight: 17, textAlign: 'center', paddingHorizontal: 8 },

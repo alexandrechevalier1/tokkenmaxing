@@ -3,8 +3,10 @@
 Tes limites Claude, **Session** (fenêtre de 5 h) et **Hebdo**, en direct, sous forme d'anneaux :
 
 - **dans la barre des tâches Windows** : deux icônes, « S » et « H » ;
-- **sur le téléphone** : une appli React Native (Expo) avec les mêmes anneaux ;
+- **sur le téléphone** : une appli React Native (Expo) avec les mêmes anneaux, connectée directement à ton compte Claude, sans PC ;
 - **sur l'écran d'accueil Samsung** : un widget Android avec les deux anneaux.
+
+Le PC et le téléphone sont indépendants : chacun lit les chiffres chez Claude de son côté.
 
 Les pourcentages sont ceux que Claude affiche lui-même (paramètres d'utilisation sur claude.ai, `/usage` dans Claude Code). Ils incluent tout ce qui consomme ton abonnement : Cowork, Claude Code et les chats.
 
@@ -30,11 +32,11 @@ Le disque se colore selon *conso ÷ objectif du moment* :
 
 Les teintes intermédiaires sont interpolées. Côté bleu, tu consommes moins vite que prévu (quota qui risque d'être perdu) ; côté rouge, plus vite (tu toucheras la limite avant la réinitialisation). Entre 90 % et 110 %, l'appli affiche « Dans le rythme ».
 
-Les objectifs se règlent dans le tableau de bord Windows ou dans l'appli (boutons − / +, par pas de 5). Ils sont stockés sur le PC, donc la barre des tâches, l'appli et le widget affichent toujours les mêmes.
+Les objectifs se règlent dans le tableau de bord Windows et dans l'appli (boutons − / +, par pas de 5). Chaque appareil garde les siens : ceux du téléphone valent pour l'appli et le widget, ceux du PC pour la barre des tâches et le tableau de bord.
 
 La limite hebdo se réinitialise toutes les semaines à la même heure. Si Claude n'a pas encore donné la nouvelle heure (PC éteint pendant la réinitialisation, rien consommé depuis), l'appli la déduit de la précédente, +7 jours.
 
-## D'où viennent les chiffres
+## D'où viennent les chiffres (Windows)
 
 L'appli Windows interroge Claude toutes les 2 min, avec le même service que la commande `/usage` de Claude Code (`api.anthropic.com/api/oauth/usage`). Elle utilise pour cela le jeton de connexion que Claude Code a enregistré dans `%USERPROFILE%\.claude\.credentials.json`.
 
@@ -47,30 +49,29 @@ L'appli Windows interroge Claude toutes les 2 min, avec le même service que la 
 
 `dist/windows/TokkenMaxing.exe` (un seul fichier). Il nécessite le **.NET 9 Desktop Runtime**, déjà présent si le SDK .NET 9 est installé.
 
-- **Clic gauche** sur un anneau : tableau de bord. On y trouve les deux grands anneaux avec l'heure de réinitialisation, le rythme (« 102 % de l'objectif », « Attendu maintenant : 43 % »), la répartition de la semaine (Cowork, Claude Code, chats), les objectifs avec la légende des couleurs, et la connexion téléphone.
+- **Clic gauche** sur un anneau : tableau de bord. On y trouve les deux grands anneaux avec l'heure de réinitialisation, le rythme (« 102 % de l'objectif », « Attendu maintenant : 43 % »), la répartition de la semaine (Cowork, Claude Code, chats), et les objectifs avec la légende des couleurs.
 - Les icônes de la barre des tâches n'ont que la couleur, sans point blanc : à 16 px, il ne tiendrait pas sur l'anneau. La lettre passe en foncé sur les disques clairs.
-- **Clic droit** : actualiser, choix des anneaux affichés dans la barre, partage, démarrage avec Windows, pare-feu, quitter.
+- **Clic droit** : actualiser, choix des anneaux affichés dans la barre, démarrage avec Windows, dossier des réglages, quitter.
 - Au premier lancement, les icônes sont placées directement sur la barre des tâches, pas dans le menu « ^ ». Cela ne s'applique que si tu n'as pas déjà fait un choix dans *Paramètres › Personnalisation › Barre des tâches › Autres icônes de la barre d'état système*.
 - Les réglages sont stockés dans `%APPDATA%\TokkenMaxing\settings.json`.
 
 ## Téléphone (Android / Samsung)
 
-1. Installe l'APK `dist/android/TokkenMaxing.apk`. Copie-le sur le téléphone et ouvre-le ; Android demandera d'autoriser l'installation depuis cette source. Avec le débogage USB activé, tu peux aussi lancer `adb install dist\android\TokkenMaxing.apk`.
-2. Pour joindre le PC **de partout** (4G, autre Wi-Fi), installe [Tailscale](https://tailscale.com) sur le PC et sur le téléphone, connectés au même compte. Sans Tailscale, le téléphone doit être sur le même Wi-Fi que le PC.
-3. Sur le PC, autorise le port dans le pare-feu, une seule fois. Passe par le lien du tableau de bord *Téléphone bloqué ? Autoriser dans le pare-feu…*, ou lance dans un terminal administrateur :
-   ```
-   netsh advfirewall firewall add rule name="TokkenMaxing (TCP 7420)" dir=in action=allow protocol=TCP localport=7420 profile=private
-   netsh advfirewall firewall add rule name="TokkenMaxing Tailscale (TCP 7420)" dir=in action=allow protocol=TCP localport=7420 remoteip=100.64.0.0/10 profile=any
-   ```
-   La seconde règle n'accepte que tes appareils Tailscale (adresses `100.64.0.0/10`), quel que soit le réseau.
-4. Dans l'appli, saisis l'**adresse** et le **code** affichés en bas du tableau de bord Windows. Quand Tailscale tourne sur le PC, le tableau de bord affiche son adresse Tailscale (`http://100.x.y.z:7420 · Tailscale`), qui marche partout ; l'adresse Wi-Fi reste dans l'infobulle.
+L'appli se connecte **directement à ton compte Claude** : pas de PC, pas de Tailscale, pas de Wi-Fi commun. Ça marche partout où le téléphone a Internet.
 
-Avec Tailscale, le PC doit rester allumé avec TokkenMaxing lancé, et Tailscale doit être actif sur le téléphone. Android n'accepte qu'un VPN actif à la fois. Le trafic entre tes deux appareils est chiffré par Tailscale, et rien n'est exposé sur Internet.
-5. Pour le widget, utilise **Ajouter le widget** dans l'appli, ou fais un appui long sur l'écran d'accueil › Widgets › TokkenMaxing.
+1. Installe l'APK `dist/android/TokkenMaxing.apk`. Copie-le sur le téléphone et ouvre-le ; Android demandera d'autoriser l'installation depuis cette source. Avec le débogage USB activé, tu peux aussi lancer `adb install -r dist\android\TokkenMaxing.apk`.
+2. Dans l'appli, touche **Se connecter à Claude**. La page Claude s'ouvre dans le navigateur du téléphone : connecte-toi si besoin (Google, e-mail…), puis autorise l'accès.
+3. Claude affiche un **code**. Copie-le avec le bouton de la page et reviens dans l'appli : le code est repris tout seul depuis le presse-papiers. Sinon, touche **Coller** puis **Valider**.
+4. Pour le widget, utilise **Ajouter le widget** dans l'appli, ou fais un appui long sur l'écran d'accueil › Widgets › TokkenMaxing.
 
-La carte **Objectifs** de l'appli règle les objectifs du PC (il faut que le PC soit joignable).
+C'est le même parcours que `claude /login` quand Claude Code ne peut pas ouvrir le navigateur lui-même (« colle le code »).
 
-Le téléphone ne parle qu'au PC, jamais directement à Claude, et le jeton ne quitte pas le PC. L'appli se met à jour toutes les 5 s quand elle est ouverte, et pousse aussi les valeurs vers le widget. Quand l'appli est fermée, Android limite les mises à jour du widget à une toutes les 30 min. **Touche un anneau du widget** pour l'actualiser immédiatement ; toucher le reste ouvre l'appli.
+- Le téléphone obtient **sa propre connexion**, distincte de celle de Claude Code sur le PC. Il la renouvelle tout seul avant expiration, sans jamais déconnecter Claude Code. Si Claude finit par la refuser, l'appli et le widget te demandent de te reconnecter.
+- Les jetons sont rangés dans le stockage chiffré d'Android (Keystore, via `expo-secure-store`), exclus des sauvegardes, et ne quittent le téléphone que vers Claude. **Se déconnecter** les efface.
+- L'appli demande seulement les droits `user:profile` et `user:inference`, et ne s'en sert que pour lire `api.anthropic.com/api/oauth/usage`.
+- L'appli lit Claude une fois par minute quand elle est ouverte (et à chaque retour dans l'appli, ou en tirant l'écran vers le bas), et pousse les valeurs vers le widget. Quand l'appli est fermée, Android limite les mises à jour du widget à une toutes les 30 min. **Touche un anneau du widget** pour l'actualiser immédiatement ; toucher le reste ouvre l'appli.
+- Si Claude répond « trop de requêtes », l'appli attend le délai indiqué (2 min au moins) avant de réessayer.
+- Comme pour Windows, ce service n'est pas documenté et l'appli utilise l'identifiant OAuth de Claude Code : même zone grise des conditions d'utilisation, et ça peut casser sans préavis.
 
 ## Compiler
 
@@ -90,7 +91,7 @@ Sous Windows, le ninja fourni avec le SDK Android ne sait pas ouvrir les chemins
 
 Outils intégrés à l'exe :
 
-- `TokkenMaxing.exe --dump report.json` interroge Claude une fois et écrit le JSON envoyé au téléphone.
+- `TokkenMaxing.exe --dump report.json` interroge Claude une fois et écrit le rapport en JSON.
 - `TokkenMaxing.exe --preview <dossier>` dessine le tableau de bord et les icônes en PNG, à partir du cache, sans appel réseau.
 - `TokkenMaxing.exe --render-assets mobile\assets desktop\app.ico` régénère les icônes à partir du même code d'anneau.
 
@@ -102,13 +103,13 @@ desktop/   C# .NET 9 WinForms, sans dépendance externe
   RingRenderer.cs    dessin de l'anneau (GDI+), thème clair ou sombre selon la barre des tâches
   TrayContext.cs     les deux icônes, menu, boucle d'actualisation, promotion Windows 11, démarrage auto
   PopupForm.cs       tableau de bord
-  ApiServer.cs       mini serveur HTTP sur le réseau local (port 7420) : lecture, et réglage des objectifs
 mobile/    Expo SDK 58 / React Native 0.88
+  src/oauth.ts                     connexion Claude, partie pure : URL d'autorisation PKCE, lecture du code collé
+  src/claude.ts                    connexion et jetons (stockage sécurisé, renouvellement), lecture de l'utilisation
+  src/report.ts                    réponse de Claude → anneaux (même lecture que PlanUsage.cs), réinitialisation hebdo projetée
   src/objective.ts                 le même calcul d'objectif et la même échelle de couleurs, refaits à l'affichage
   src/ring.ts                      le même anneau en SVG (géométrie identique, point blanc)
-  App.tsx                          écran principal
+  App.tsx                          écran principal, carte « Compte Claude »
   src/widget/TokenRingWidget.tsx   widget (react-native-android-widget)
-  src/widget/widgetTaskHandler.tsx mises à jour du widget, y compris appli fermée
+  src/widget/widgetTaskHandler.tsx mises à jour du widget, y compris appli fermée (il lit Claude lui-même)
 ```
-
-API du PC : `GET /api/ping` (sans code), `GET /api/usage` et `POST /api/targets?session=80&weekly=100` (en-tête `Authorization: Bearer <code>`, ou `?code=`). Le JSON (version 3) contient `limits` (session et hebdo : `percent`, `resetsAt`, `pace` = part écoulée, `target` = objectif, `expected` = objectif du moment, `ratio`, `marker` = position du point blanc, `status` = `under` / `on_track` / `over` / `idle`, `color`), `breakdown` (répartition de la semaine), la source (`live` ou `cache`) et l'éventuel problème de lecture. `POST /api/targets` renvoie le même JSON, avec les nouveaux objectifs déjà appliqués.

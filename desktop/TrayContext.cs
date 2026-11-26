@@ -4,7 +4,7 @@ using Microsoft.Win32;
 
 namespace TokkenMaxing;
 
-/// <summary>Owns the two tray rings (Session, Hebdo), the refresh loop, the LAN server and the dashboard.</summary>
+/// <summary>Owns the two tray rings (Session, Hebdo), the refresh loop and the dashboard.</summary>
 sealed class TrayContext : ApplicationContext, IDashboardHost
 {
     readonly AppSettings _settings = AppSettings.Load();
@@ -13,23 +13,17 @@ sealed class TrayContext : ApplicationContext, IDashboardHost
     readonly TrayRing _sessionIcon;
     readonly TrayRing _weeklyIcon;
     readonly System.Windows.Forms.Timer _timer;
-    readonly ToolStripMenuItem _sessionItem, _weeklyItem, _startupItem, _shareItem;
-    readonly SynchronizationContext _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+    readonly ToolStripMenuItem _sessionItem, _weeklyItem, _startupItem;
 
-    volatile UsageReport? _report;
-    ApiServer? _server;
+    UsageReport? _report;
     PopupForm? _popup;
     bool _busy;
     DateTime _popupHiddenAt;
-
-    public AppSettings Settings => _settings;
-    public ApiServer? Server => _server;
 
     public TrayContext()
     {
         _sessionItem = new ToolStripMenuItem("Anneau Session dans la barre des tâches", null, (_, _) => SetTrayIcon("session", !_settings.TraySession));
         _weeklyItem = new ToolStripMenuItem("Anneau Hebdo dans la barre des tâches", null, (_, _) => SetTrayIcon("weekly", !_settings.TrayWeekly));
-        _shareItem = new ToolStripMenuItem("Partager avec le téléphone (réseau local)", null, (_, _) => SetServerEnabled(!_settings.ServerEnabled));
         _startupItem = new ToolStripMenuItem("Lancer au démarrage de Windows", null, (_, _) => SetStartup(!StartupManager.IsEnabled));
 
         _menu = new ContextMenuStrip();
@@ -41,10 +35,8 @@ sealed class TrayContext : ApplicationContext, IDashboardHost
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(_sessionItem);
         _menu.Items.Add(_weeklyItem);
-        _menu.Items.Add(_shareItem);
         _menu.Items.Add(_startupItem);
         _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(new ToolStripMenuItem("Autoriser le téléphone dans le pare-feu…", null, (_, _) => AllowFirewall()));
         _menu.Items.Add(new ToolStripMenuItem("Ouvrir le dossier des réglages", null, (_, _) =>
             Process.Start(new ProcessStartInfo("explorer.exe", $"\"{AppSettings.Dir}\"") { UseShellExecute = true })));
         _menu.Items.Add(new ToolStripSeparator());
@@ -57,7 +49,6 @@ sealed class TrayContext : ApplicationContext, IDashboardHost
         _weeklyIcon.Visible = _settings.TrayWeekly;
         _sessionIcon.Visible = _settings.TraySession;
 
-        ApplyServer();
         SystemEvents.UserPreferenceChanged += OnThemeChanged;
         SystemEvents.DisplaySettingsChanged += OnThemeChanged;
         SchedulePromotion();
@@ -118,7 +109,6 @@ sealed class TrayContext : ApplicationContext, IDashboardHost
         _sessionItem.Checked = _settings.TraySession;
         _weeklyItem.Checked = _settings.TrayWeekly;
         _startupItem.Checked = StartupManager.IsEnabled;
-        _shareItem.Checked = _settings.ServerEnabled;
     }
 
     // ---- settings, used by the menu and the dashboard ----
@@ -131,26 +121,6 @@ sealed class TrayContext : ApplicationContext, IDashboardHost
         else _settings.SessionTarget = target;
         _settings.Save();
         Rebuild();
-    }
-
-    /// <summary>Called by the LAN server (phone app), off the UI thread.</summary>
-    Task<UsageReport?> SetTargetsFromPhone(int? session, int? weekly)
-    {
-        var done = new TaskCompletionSource<UsageReport?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _ui.Post(_ =>
-        {
-            try
-            {
-                if (session is { } s) SetTarget("session", s);
-                if (weekly is { } w) SetTarget("weekly", w);
-                done.TrySetResult(_report ?? UsageReportBuilder.Build(_client, _settings));
-            }
-            catch (Exception ex)
-            {
-                done.TrySetException(ex);
-            }
-        }, null);
-        return done.Task;
     }
 
     public void SetTrayIcon(string key, bool visible)
@@ -170,63 +140,10 @@ sealed class TrayContext : ApplicationContext, IDashboardHost
         if (_popup is { Visible: true } && _report is { } r) _popup.ShowReport(r);
     }
 
-    public void SetServerEnabled(bool value)
-    {
-        _settings.ServerEnabled = value;
-        _settings.Save();
-        ApplyServer();
-        if (_popup is { Visible: true } && _report is { } r) _popup.ShowReport(r);
-    }
-
     public void SetStartup(bool value)
     {
         StartupManager.Set(value);
         if (_popup is { Visible: true } && _report is { } r) _popup.ShowReport(r);
-    }
-
-    public void RegenerateAccessCode()
-    {
-        _settings.AccessCode = AppSettings.NewAccessCode();
-        _settings.Save();
-        if (_popup is { Visible: true } && _report is { } r) _popup.ShowReport(r);
-    }
-
-    /// <summary>
-    /// Opens Windows' UAC prompt to add two inbound rules for the server port: one for private networks
-    /// (home Wi-Fi), one for Tailscale devices only (any network profile, but only from 100.64.0.0/10).
-    /// The rules are replaced, not duplicated, when this is run again.
-    /// </summary>
-    public void AllowFirewall()
-    {
-        var name = $"TokkenMaxing (TCP {_settings.Port})";
-        var tailscale = $"TokkenMaxing Tailscale (TCP {_settings.Port})";
-        var command =
-            $"/c netsh advfirewall firewall delete rule name=\"{name}\" >nul 2>&1 & " +
-            $"netsh advfirewall firewall add rule name=\"{name}\" dir=in action=allow protocol=TCP localport={_settings.Port} profile=private & " +
-            $"netsh advfirewall firewall delete rule name=\"{tailscale}\" >nul 2>&1 & " +
-            $"netsh advfirewall firewall add rule name=\"{tailscale}\" dir=in action=allow protocol=TCP localport={_settings.Port} remoteip={ApiServer.TailscaleRange} profile=any";
-        try
-        {
-            Process.Start(new ProcessStartInfo("cmd.exe", command)
-            {
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden,
-            });
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            // UAC prompt cancelled.
-        }
-    }
-
-    void ApplyServer()
-    {
-        _server?.Dispose();
-        _server = null;
-        if (!_settings.ServerEnabled) return;
-        _server = new ApiServer(_settings.Port, () => _report, () => _settings.AccessCode, SetTargetsFromPhone);
-        _server.Start();
     }
 
     /// <summary>
@@ -283,7 +200,6 @@ sealed class TrayContext : ApplicationContext, IDashboardHost
         SystemEvents.UserPreferenceChanged -= OnThemeChanged;
         SystemEvents.DisplaySettingsChanged -= OnThemeChanged;
         _timer.Stop();
-        _server?.Dispose();
         _popup?.Dispose();
         _sessionIcon.Dispose();
         _weeklyIcon.Dispose();

@@ -45,15 +45,9 @@
           ]
         }
       ],
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "usesCleartextTraffic": true
-          }
-        }
-      ],
-      "./plugins/withCmakeObjectPathMax"
+      "./plugins/withCmakeObjectPathMax",
+      "expo-web-browser",
+      "expo-secure-store"
     ]
   }
 }

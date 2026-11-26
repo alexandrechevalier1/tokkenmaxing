@@ -8,15 +8,17 @@ static class Program
     static int Main(string[] args)
     {
         // Tooling entry points (no UI):
-        //   TokkenMaxing.exe --dump report.json             ask Claude once and write the JSON the phone receives
+        //   TokkenMaxing.exe --dump report.json             ask Claude once and write the report as JSON
         //   TokkenMaxing.exe --render-assets <mobile/assets> <app.ico>   render icons from the same ring code
         if (args is ["--dump", var output])
         {
             var client = new PlanUsageClient();
             client.RefreshAsync().GetAwaiter().GetResult();
             var report = UsageReportBuilder.Build(client, AppSettings.Load());
-            File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions(ApiServer.Json)
+            File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions
             {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping, // keep accents readable
                 WriteIndented = true,
             }));
             return 0;

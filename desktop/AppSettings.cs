@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace TokkenMaxing;
@@ -27,14 +26,6 @@ public sealed class AppSettings
 
     /// <summary>How often Claude is asked for fresh numbers (seconds, minimum 60).</summary>
     public int RefreshSeconds { get; set; } = 120;
-
-    /// <summary>Expose the usage on the local network so the phone app can read it.</summary>
-    public bool ServerEnabled { get; set; } = true;
-
-    public int Port { get; set; } = 7420;
-
-    /// <summary>Code the phone must send (Authorization: Bearer &lt;code&gt;).</summary>
-    public string AccessCode { get; set; } = "";
 
     public static string Dir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TokkenMaxing");
@@ -75,9 +66,8 @@ public sealed class AppSettings
         s.WeeklyTarget = Math.Clamp(s.WeeklyTarget, 1, 100);
         if (!s.TraySession && !s.TrayWeekly) s.TraySession = s.TrayWeekly = true;
         s.RefreshSeconds = Math.Max(60, s.RefreshSeconds);
-        if (s.Port is < 1024 or > 65535) s.Port = 7420;
-        if (string.IsNullOrWhiteSpace(s.AccessCode)) s.AccessCode = NewAccessCode();
 
+        // Rewritten at once: drops the settings of the old phone link (ServerEnabled, Port, AccessCode).
         s.Save();
         return s;
     }
@@ -95,12 +85,5 @@ public sealed class AppSettings
         {
             // Settings are a convenience; never crash the tray app over them.
         }
-    }
-
-    /// <summary>8 characters, no ambiguous ones (0/O, 1/I/L), easy to type on a phone.</summary>
-    public static string NewAccessCode()
-    {
-        const string alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-        return RandomNumberGenerator.GetString(alphabet, 8);
     }
 }

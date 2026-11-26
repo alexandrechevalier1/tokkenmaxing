@@ -23,7 +23,7 @@ sealed class PopupForm : Form
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
     readonly IDashboardHost _host;
-    readonly Label _source, _address, _code, _hint;
+    readonly Label _source;
     readonly RingView[] _rings = new RingView[2];
     readonly Label[] _resets = new Label[2];
     readonly Label[] _statuses = new Label[2];
@@ -31,9 +31,8 @@ sealed class PopupForm : Form
     readonly Label[] _rowNames = new Label[MaxRows];
     readonly Label[] _rowValues = new Label[MaxRows];
     readonly NumericUpDown[] _targets = new NumericUpDown[2];
-    readonly CheckBox _startup, _share;
-    readonly Button _copy, _newCode, _refresh;
-    readonly LinkLabel _firewall;
+    readonly CheckBox _startup;
+    readonly Button _refresh;
     readonly ToolTip _tooltip = new();
     bool _syncing;
 
@@ -147,33 +146,7 @@ sealed class PopupForm : Form
         y += 38;
         _startup = Add(Check("Lancer au démarrage de Windows", y));
         _startup.CheckedChanged += (_, _) => { if (!_syncing) _host.SetStartup(_startup.Checked); };
-        y += 30;
-        Separator(ref y);
-
-        // Phone
-        _share = Add(Check("Partager avec le téléphone (réseau local)", y));
-        _share.CheckedChanged += (_, _) => { if (!_syncing) _host.SetServerEnabled(_share.Checked); };
-        y += 28;
-        _address = Add(new Label { AutoSize = false, Location = new(Pad, y), Size = new(W - 2 * Pad, 20), Font = new Font("Consolas", 9.5F) });
-        y += 24;
-        _code = Add(new Label { AutoSize = false, Location = new(Pad, y), Size = new(170, 26), TextAlign = ContentAlignment.MiddleLeft, Font = new Font("Consolas", 11F, FontStyle.Bold) });
-        _copy = Add(FlatButton("Copier", new(W - Pad - 152, y), 70));
-        _copy.Click += (_, _) => CopyAddress();
-        _newCode = Add(FlatButton("Nouveau", new(W - Pad - 78, y), 78));
-        _tooltip.SetToolTip(_newCode, "Générer un nouveau code (le téléphone devra être reconfiguré)");
-        _newCode.Click += (_, _) => _host.RegenerateAccessCode();
-        y += 34;
-        _hint = Add(new Label { ForeColor = Muted, AutoSize = false, Location = new(Pad, y), Size = new(W - 2 * Pad, 34), Font = new Font("Segoe UI", 8F) });
-        y += 36;
-        _firewall = Add(new LinkLabel
-        {
-            Text = "Téléphone bloqué ? Autoriser dans le pare-feu…", AutoSize = true, Location = new(Pad, y),
-            Font = new Font("Segoe UI", 8F), LinkColor = Palette.ToColor(Palette.Accent), ActiveLinkColor = Fg,
-            LinkBehavior = LinkBehavior.HoverUnderline,
-        });
-        _tooltip.SetToolTip(_firewall, "Autorise le port du serveur depuis les réseaux privés et depuis tes appareils Tailscale uniquement (demande administrateur).");
-        _firewall.LinkClicked += (_, _) => _host.AllowFirewall();
-        y += 28;
+        y += 32;
 
         ClientSize = new Size(W, y);
         ResumeLayout(false);
@@ -297,70 +270,10 @@ sealed class PopupForm : Form
             if (rows.Count == 0) _rowNames[0].Text = report.HasData ? "Pas de détail fourni par Claude" : "";
 
             _startup.Checked = StartupManager.IsEnabled;
-            ShowServer();
         }
         finally
         {
             _syncing = false;
-        }
-    }
-
-    void ShowServer()
-    {
-        var settings = _host.Settings;
-        var server = _host.Server;
-        _share.Checked = settings.ServerEnabled;
-        _copy.Enabled = _newCode.Enabled = settings.ServerEnabled;
-        _firewall.Visible = settings.ServerEnabled;
-
-        if (!settings.ServerEnabled)
-        {
-            _address.Text = "—";
-            _code.Text = "";
-            _hint.Text = "Active le partage pour voir tes anneaux sur le téléphone.";
-            _hint.ForeColor = Muted;
-            return;
-        }
-
-        var (url, viaTailscale) = PhoneAddress();
-        var lan = ApiServer.LanAddresses().Select(ip => $"http://{ip}:{settings.Port}").ToList();
-        _address.Text = url is null ? $"Pas de réseau · port {settings.Port}" : viaTailscale ? $"{url}  · Tailscale" : url;
-        var others = viaTailscale ? lan : lan.Skip(1).ToList();
-        _tooltip.SetToolTip(_address, others.Count > 0
-            ? (viaTailscale ? "Sur le Wi-Fi du PC seulement :\n" : "Autres adresses :\n") + string.Join("\n", others)
-            : "");
-        _code.Text = $"Code : {settings.AccessCode}";
-        _hint.Text = server?.Error is { } error
-            ? $"Serveur arrêté : {error}"
-            : viaTailscale
-                ? "Entre l'adresse et le code dans l'appli du téléphone : elle marche partout (4G, autre Wi-Fi) tant que Tailscale y est actif."
-                : "Entre l'adresse et le code dans l'appli TokkenMaxing du téléphone (même Wi-Fi que le PC, ou installe Tailscale).";
-        _hint.ForeColor = server?.Error is null ? Muted : Danger;
-    }
-
-    /// <summary>The address to give the phone: Tailscale (works from anywhere) first, else the LAN one.</summary>
-    (string? url, bool viaTailscale) PhoneAddress()
-    {
-        var port = _host.Settings.Port;
-        if (ApiServer.TailscaleAddress() is { } ts) return ($"http://{ts}:{port}", true);
-        var ips = ApiServer.LanAddresses();
-        return ips.Count > 0 ? ($"http://{ips[0]}:{port}", false) : (null, false);
-    }
-
-    void CopyAddress()
-    {
-        if (PhoneAddress().url is not { } url) return;
-        try
-        {
-            Clipboard.SetText(url);
-            _copy.Text = "Copié ✓";
-            var reset = new System.Windows.Forms.Timer { Interval = 1500 };
-            reset.Tick += (_, _) => { _copy.Text = "Copier"; reset.Dispose(); };
-            reset.Start();
-        }
-        catch (ExternalException)
-        {
-            // Clipboard busy.
         }
     }
 
